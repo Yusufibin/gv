@@ -24,19 +24,19 @@ $ gv status
 **Quick install**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/your-user/gv/main/gv \
+curl -fsSL https://raw.githubusercontent.com/Yusufibin/gv/main/gv \
   -o /usr/local/bin/gv && chmod +x /usr/local/bin/gv
 ```
 
 **Manual install**
 
 ```bash
-git clone https://github.com/your-user/gv.git
+git clone https://github.com/Yusufibin/gv.git
 cp gv/gv /usr/local/bin/gv
 chmod +x /usr/local/bin/gv
 ```
 
-**Requirements**: bash 4+, git 2.x — nothing else.
+**Requirements**: bash 4+,zsh, git 2.x — nothing else.
 
 ---
 
@@ -120,6 +120,3 @@ For new commands, open an issue first to discuss whether it fits the philosophy 
 
 ---
 
-## License
-
-MIT — see [LICENSE](LICENSE).
