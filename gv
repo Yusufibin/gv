@@ -1,0 +1,460 @@
+#!/usr/bin/env bash
+# gv — git wrapper simplifié
+# Commandes : switch, full, list, return, status, diff
+
+set -euo pipefail
+
+GV_VERSION="1.2.0"
+
+# ─── couleurs ────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GRN='\033[0;32m'
+YLW='\033[0;33m'
+BLU='\033[0;34m'
+CYN='\033[0;36m'
+BLD='\033[1m'
+DIM='\033[2m'
+RST='\033[0m'
+
+# ─── helpers ─────────────────────────────────────────────────────────────────
+_in_git_repo() {
+  git rev-parse --git-dir &>/dev/null || {
+    echo -e "${RED}✗ Pas dans un dépôt git.${RST}" >&2
+    exit 1
+  }
+}
+
+_print_help() {
+  local branch=""
+  local repo_info=""
+  if git rev-parse --git-dir &>/dev/null 2>&1; then
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    local commits
+    commits=$(git rev-list --count HEAD 2>/dev/null || echo "0")
+    [[ -n "$branch" ]] && repo_info="${DIM}branche : ${CYN}${branch}${DIM} · ${commits} commits${RST}"
+  fi
+
+  echo ""
+  echo -e "  ${BLD}${CYN} ██████╗ ██╗   ██╗${RST}"
+  echo -e "  ${BLD}${CYN}██╔════╝ ██║   ██║${RST}   ${BLD}git, version courte${RST}   ${DIM}v${GV_VERSION}${RST}"
+  echo -e "  ${BLD}${CYN}██║  ███╗██║   ██║${RST}"
+  echo -e "  ${BLD}${CYN}██║   ██║╚██╗ ██╔╝${RST}   ${repo_info}"
+  echo -e "  ${BLD}${CYN}╚██████╔╝ ╚████╔╝ ${RST}"
+  echo -e "  ${BLD}${CYN} ╚═════╝   ╚═══╝  ${RST}"
+  echo ""
+  echo -e "  ${DIM}────────────────────────────────────────────────────${RST}"
+  echo ""
+  echo -e "  ${BLD}COMMANDES${RST}"
+  echo ""
+  printf "  ${GRN}%-22s${RST} %s\n" "gv switch" "navigation interactive entre branches"
+  printf "  ${GRN}%-22s${RST} %s\n" "gv full [message]" "add + commit en une fois"
+  printf "  ${GRN}%-22s${RST} %s\n" "gv list [-n N]" "liste les N derniers commits  ${DIM}(défaut : 5)${RST}"
+  printf "  ${GRN}%-22s${RST} %s\n" "gv status" "état du dépôt coloré et lisible"
+  printf "  ${GRN}%-22s${RST} %s\n" "gv diff" "voir les modifications fichier par fichier"
+  printf "  ${GRN}%-22s${RST} %s\n" "gv return <hash>" "revenir à un commit précis"
+  echo ""
+  echo -e "  ${DIM}────────────────────────────────────────────────────${RST}"
+  echo ""
+  echo -e "  ${BLD}EXEMPLES${RST}"
+  echo ""
+  echo -e "  ${DIM}\$${RST} gv switch                ${DIM}# choisir une branche avec ↑↓ + Enter${RST}"
+  echo -e "  ${DIM}\$${RST} gv full                  ${DIM}# add tout + saisir le message${RST}"
+  echo -e "  ${DIM}\$${RST} gv full \"fix: typo\"       ${DIM}# add tout + commit direct${RST}"
+  echo -e "  ${DIM}\$${RST} gv list                  ${DIM}# 5 derniers commits${RST}"
+  echo -e "  ${DIM}\$${RST} gv list -n 20            ${DIM}# 20 derniers commits${RST}"
+  echo -e "  ${DIM}\$${RST} gv status                ${DIM}# état propre du repo${RST}"
+  echo -e "  ${DIM}\$${RST} gv diff                  ${DIM}# inspecter les modifs${RST}"
+  echo -e "  ${DIM}\$${RST} gv return a3f9c12        ${DIM}# retourner à ce commit${RST}"
+  echo ""
+}
+
+# ─── gv switch ───────────────────────────────────────────────────────────────
+_switch() {
+  _in_git_repo
+
+  # Récupère toutes les branches locales uniquement (propre, sans remotes)
+  mapfile -t branches < <(
+    git branch --format='%(refname:short)' | sort -u
+  )
+
+  # Ajoute les branches remote non présentes en local (exclut les noms de remotes purs)
+  local remotes
+  mapfile -t remotes < <(git remote)
+  while IFS= read -r rb; do
+    local is_remote_name=0
+    for r in "${remotes[@]}"; do [[ "$rb" == "$r" ]] && is_remote_name=1 && break; done
+    [[ $is_remote_name -eq 1 ]] && continue
+    local found=0
+    for b in "${branches[@]}"; do [[ "$b" == "$rb" ]] && found=1 && break; done
+    [[ $found -eq 0 ]] && branches+=("$rb")
+  done < <(git branch -r --format='%(refname:short)' | sed 's|^origin/||' | grep -v '^HEAD$' | sort -u)
+
+  if [[ ${#branches[@]} -eq 0 ]]; then
+    echo -e "${YLW}⚠ Aucune branche trouvée.${RST}"
+    exit 0
+  fi
+
+  local current
+  current=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+
+  echo -e "\n${BLD}Branches disponibles${RST}\n"
+
+  for i in "${!branches[@]}"; do
+    local branch="${branches[$i]}"
+    local marker=""
+    local num
+    num=$(( i + 1 ))
+    [[ "$branch" == "$current" ]] && marker=" ${GRN}← actuelle${RST}"
+    printf "  ${CYN}%2d)${RST}  %s%b\n" "$num" "$branch" "$marker"
+  done
+
+  echo ""
+  echo -ne "${BLD}Numéro (q pour annuler) :${RST} "
+  IFS= read -r choice </dev/tty
+  echo ""
+
+  [[ "$choice" == "q" || "$choice" == "Q" || -z "$choice" ]] && {
+    echo -e "${DIM}Annulé.${RST}"
+    return
+  }
+
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#branches[@]} )); then
+    echo -e "${RED}✗ Numéro invalide.${RST}" >&2
+    return 1
+  fi
+
+  local target="${branches[$((choice - 1))]}"
+
+  if [[ "$target" == "$current" ]]; then
+    echo -e "${YLW}⚠ Déjà sur la branche ${BLD}${target}${RST}"
+  else
+    echo -e "${BLU}→ Changement vers ${BLD}${target}${RST}"
+    git checkout "$target"
+  fi
+}
+
+# ─── gv full ─────────────────────────────────────────────────────────────────
+_full() {
+  _in_git_repo
+
+  local message="${1:-}"
+
+  # Vérifie s'il y a quelque chose à commiter
+  local status
+  status=$(git status --porcelain)
+  if [[ -z "$status" ]]; then
+    echo -e "${YLW}⚠ Rien à commiter — répertoire de travail propre.${RST}"
+    exit 0
+  fi
+
+  # Affiche un résumé des changements
+  echo -e "\n${BLD}Fichiers modifiés :${RST}"
+  git status --short | while IFS= read -r line; do
+    local flag="${line:0:2}"
+    local file="${line:3}"
+    case "$flag" in
+      ' M'|'M '|'MM') echo -e "  ${YLW}~${RST} $file" ;;
+      ' D'|'D '|'DD') echo -e "  ${RED}−${RST} $file" ;;
+      '??')            echo -e "  ${DIM}?${RST} $file" ;;
+      *)               echo -e "  ${GRN}+${RST} $file" ;;
+    esac
+  done
+  echo ""
+
+  # Demande le message si non fourni
+  if [[ -z "$message" ]]; then
+    echo -ne "${BLD}Message de commit :${RST} "
+    IFS= read -r message
+    echo ""
+    if [[ -z "$message" ]]; then
+      echo -e "${RED}✗ Message vide — commit annulé.${RST}"
+      exit 1
+    fi
+  fi
+
+  git add -A
+  git commit -m "$message"
+  echo -e "\n${GRN}✓ Commit créé avec succès.${RST}"
+}
+
+# ─── gv list ─────────────────────────────────────────────────────────────────
+_list() {
+  _in_git_repo
+
+  local n=5
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -n) n="${2:?-n requiert un nombre}"; shift 2 ;;
+      -n*) n="${1#-n}"; shift ;;
+      *) echo -e "${RED}✗ Option inconnue : $1${RST}" >&2; exit 1 ;;
+    esac
+  done
+
+  if ! [[ "$n" =~ ^[0-9]+$ ]] || [[ "$n" -lt 1 ]]; then
+    echo -e "${RED}✗ -n doit être un entier positif.${RST}" >&2
+    exit 1
+  fi
+
+  local branch
+  branch=$(git rev-parse --abbrev-ref HEAD)
+  echo -e "\n${BLD}${n} derniers commits${RST} ${DIM}branche : ${CYN}${branch}${RST}\n"
+
+  git log --format="%H|%ar|%s|%an" -n "$n" | while IFS='|' read -r hash date subject author; do
+    local short="${hash:0:7}"
+    printf "  ${CYN}${BLD}%s${RST}  ${DIM}%-16s${RST}  %-40s  ${DIM}%s${RST}\n" \
+      "$short" "$date" "$subject" "$author"
+  done
+
+  echo ""
+  echo -e "  ${DIM}╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌${RST}"
+  echo -e "  ${DIM}Pour revenir à un commit : gv return <hash>${RST}"
+  echo -e "  ${DIM}Exemple :                  gv return ${CYN}a3f9c12${RST}"
+  echo ""
+}
+
+# ─── gv return ───────────────────────────────────────────────────────────────
+_return() {
+  _in_git_repo
+
+  local hash="${1:-}"
+
+  if [[ -z "$hash" ]]; then
+    echo -e "${RED}✗ Usage : gv return <hash>${RST}" >&2
+    echo -e "${DIM}    Utilisez 'gv list' pour voir les hashes disponibles.${RST}" >&2
+    exit 1
+  fi
+
+  # Vérifie que le hash existe
+  if ! git cat-file -e "${hash}^{commit}" 2>/dev/null; then
+    echo -e "${RED}✗ Hash introuvable : ${hash}${RST}" >&2
+    exit 1
+  fi
+
+  local full_hash subject date
+  full_hash=$(git rev-parse "$hash")
+  subject=$(git log -1 --format="%s" "$hash")
+  date=$(git log -1 --format="%ar" "$hash")
+
+  echo -e "\n${BLD}Commit cible :${RST}"
+  echo -e "  ${CYN}${full_hash:0:7}${RST}  ${DIM}${date}${RST}  ${subject}\n"
+
+  # Vérifie s'il y a des changements non commités
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo -e "${YLW}⚠ Vous avez des changements non commités.${RST}"
+    echo -ne "  Continuer quand même ? ${DIM}[o/N]${RST} "
+    IFS= read -r confirm
+    [[ "$confirm" =~ ^[oOyY]$ ]] || { echo -e "${DIM}Annulé.${RST}"; exit 0; }
+    echo ""
+  fi
+
+  echo -e "${BLU}→ Retour au commit ${BLD}${full_hash:0:7}${RST}"
+  git checkout "$full_hash"
+  echo -e "\n${YLW}ℹ Vous êtes en mode 'detached HEAD'.${RST}"
+  echo -e "${DIM}   Pour créer une branche ici : git checkout -b <nom-branche>${RST}\n"
+}
+
+# ─── gv status ───────────────────────────────────────────────────────────────
+_status() {
+  _in_git_repo
+
+  local branch ahead behind
+  branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD détachée")
+
+  # Compte les commits en avance/retard sur le remote
+  ahead=$(git rev-list --count @{u}..HEAD 2>/dev/null || echo "0")
+  behind=$(git rev-list --count HEAD..@{u} 2>/dev/null || echo "0")
+
+  local remote_info=""
+  [[ "$ahead" -gt 0 ]]  && remote_info="${GRN}↑ ${ahead} à pusher${RST}"
+  [[ "$behind" -gt 0 ]] && remote_info="${remote_info:+$remote_info  }${YLW}↓ ${behind} à puller${RST}"
+
+  echo -e "\n${BLD}Status${RST}  ${DIM}branche : ${CYN}${branch}${RST}${remote_info:+  $remote_info}\n"
+
+  local raw
+  raw=$(git status --porcelain)
+
+  if [[ -z "$raw" ]]; then
+    echo -e "  ${GRN}✓ Répertoire propre — rien à commiter.${RST}\n"
+    return
+  fi
+
+  local count_new=0 count_mod=0 count_del=0
+
+  while IFS= read -r line; do
+    local xy="${line:0:2}"
+    local file="${line:3}"
+    case "$xy" in
+      '??')
+        (( count_new++ )) || true
+        printf "  ${GRN}+${RST}  %-40s  ${DIM}nouveau (non suivi)${RST}\n" "$file"
+        ;;
+      'A '|'AM')
+        (( count_new++ )) || true
+        printf "  ${GRN}+${RST}  %-40s  ${DIM}ajouté${RST}\n" "$file"
+        ;;
+      ' D'|'D '|'DD')
+        (( count_del++ )) || true
+        printf "  ${RED}−${RST}  %-40s  ${DIM}supprimé${RST}\n" "$file"
+        ;;
+      'R '|'R'*)
+        (( count_mod++ )) || true
+        printf "  ${YLW}~${RST}  %-40s  ${DIM}renommé${RST}\n" "$file"
+        ;;
+      *)
+        (( count_mod++ )) || true
+        printf "  ${YLW}~${RST}  %-40s  ${DIM}modifié${RST}\n" "$file"
+        ;;
+    esac
+  done <<< "$raw"
+
+  echo ""
+  echo -e "  ${DIM}╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌${RST}"
+  [[ $count_new -gt 0 ]] && printf "  ${GRN}+%-3s nouveau(x)${RST}   " "$count_new"
+  [[ $count_mod -gt 0 ]] && printf "  ${YLW}~%-3s modifié(s)${RST}   " "$count_mod"
+  [[ $count_del -gt 0 ]] && printf "  ${RED}−%-3s supprimé(s)${RST}" "$count_del"
+  echo -e "\n\n  ${DIM}→ gv full pour commiter · gv diff pour inspecter${RST}\n"
+}
+
+
+# ─── gv diff ─────────────────────────────────────────────────────────────────
+_diff() {
+  _in_git_repo
+
+  # Récupère tous les fichiers touchés (unstaged + staged + untracked)
+  mapfile -t files < <(
+    { git diff --name-only; git diff --cached --name-only; git ls-files --others --exclude-standard; } \
+      | sort -u
+  )
+
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo -e "\n  ${GRN}✓ Aucune modification à afficher.${RST}\n"
+    return
+  fi
+
+  echo -e "\n${BLD}${#files[@]} fichier(s) modifié(s)${RST}\n"
+
+  for i in "${!files[@]}"; do
+    local f="${files[$i]}"
+    local num=$(( i + 1 ))
+    local label=""
+
+    if git ls-files --others --exclude-standard | grep -qxF "$f" 2>/dev/null; then
+      local added; added=$(wc -l < "$f" 2>/dev/null || echo 0)
+      label="${GRN}+${added}${RST}  ${DIM}nouveau${RST}"
+    else
+      local diff_out; diff_out=$(git diff HEAD -- "$f" 2>/dev/null)
+      local added removed
+      added=$(printf '%s' "$diff_out"   | grep -c '^+[^+]' || true)
+      removed=$(printf '%s' "$diff_out" | grep -c '^-[^-]' || true)
+      label="${GRN}+${added}${RST}  ${RED}-${removed}${RST}"
+    fi
+
+    printf "  ${CYN}%2d)${RST}  %-38s  %b\n" "$num" "$f" "$label"
+  done
+
+  echo ""
+  echo -ne "${BLD}Fichier (numéro · \"a\" pour tous · q pour quitter) :${RST} "
+
+  while true; do
+    IFS= read -r choice </dev/tty
+
+    [[ "$choice" == "q" || "$choice" == "Q" ]] && {
+      echo -e "\n${DIM}Terminé.${RST}\n"
+      return
+    }
+
+    local targets=()
+    if [[ "$choice" == "a" || "$choice" == "A" ]]; then
+      targets=("${files[@]}")
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#files[@]} )); then
+      targets=("${files[$((choice - 1))]}")
+    else
+      echo -ne "${RED}✗ Invalide.${RST} Numéro, \"a\" ou q : "
+      continue
+    fi
+
+    for f in "${targets[@]}"; do
+      echo ""
+
+      # ── header fichier ────────────────────────────────────────────────────
+      local width=60
+      local title="── ${f} "
+      local pad=$(( width - ${#title} ))
+      [[ $pad -lt 0 ]] && pad=0
+      echo -e "${BLD}${DIM}┌${title}$(printf '─%.0s' $(seq 1 $pad))┐${RST}"
+
+      if git ls-files --others --exclude-standard | grep -qxF "$f" 2>/dev/null; then
+        # ── fichier non suivi : contenu complet en vert ───────────────────
+        local lnum=0
+        while IFS= read -r fline; do
+          (( lnum++ )) || true
+          printf "  ${GRN}+${RST} ${DIM}%4d${RST}  ${GRN}%s${RST}\n" "$lnum" "$fline"
+        done < "$f"
+
+      else
+        # ── fichier suivi : git diff HEAD (staged + unstaged d'un coup) ───
+        local hunk_num=0
+        local cur=0
+
+        while IFS= read -r dline; do
+          case "${dline:0:1}" in
+
+            '@')
+              # ── séparateur de hunk ──────────────────────────────────────
+              (( hunk_num++ )) || true
+              cur=$(echo "$dline" | sed -n 's/^@@ -[0-9,]* +\([0-9]*\).*/\1/p')
+              cur=$(( cur - 1 ))
+              local hunk_label; hunk_label=$(echo "$dline" | grep -oP '@@.*@@\s*\K.*' || echo "")
+              printf "\n  ${DIM}├─ hunk %d" "$hunk_num"
+              [[ -n "$hunk_label" ]] && printf "  ${CYN}%s${RST}" "$hunk_label"
+              printf " ${DIM}──────────────────────────────${RST}\n"
+              ;;
+
+            '+')
+              [[ "$dline" == +++* ]] && continue
+              (( cur++ )) || true
+              printf "  ${GRN}+${RST} ${DIM}%4d${RST}  ${GRN}%s${RST}\n" "$cur" "${dline:1}"
+              ;;
+
+            '-')
+              [[ "$dline" == ---* ]] && continue
+              printf "  ${RED}-${RST} ${DIM}    ${RST}  ${RED}%s${RST}\n" "${dline:1}"
+              ;;
+
+            ' ')
+              (( cur++ )) || true
+              printf "    ${DIM}%4d${RST}  %s\n" "$cur" "${dline:1}"
+              ;;
+
+            'd'|'i'|'\\') continue ;;
+          esac
+
+        done < <(git diff HEAD -- "$f" 2>/dev/null)
+      fi
+
+      echo -e "${DIM}└$(printf '─%.0s' $(seq 1 $width))┘${RST}"
+      echo ""
+    done
+
+    echo -ne "${BLD}Fichier (numéro · \"a\" pour tous · q pour quitter) :${RST} "
+  done
+}
+
+command="${1:-help}"
+shift || true
+
+case "$command" in
+  switch) _switch        ;;
+  full)   _full "$@"     ;;
+  list)   _list "$@"     ;;
+  status) _status        ;;
+  diff)   _diff          ;;
+  return) _return "$@"   ;;
+  help|--help|-h) _print_help ;;
+  *)
+    echo -e "${RED}✗ Commande inconnue : ${command}${RST}" >&2
+    echo -e "${DIM}   Essayez : gv help${RST}" >&2
+    exit 1
+    ;;
+esac
