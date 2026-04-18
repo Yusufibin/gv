@@ -1,3 +1,5 @@
+![screenshot](https://raw.githubusercontent.com/Yusufibin/gv/refs/heads/main/screen.png)
+
 # gv — git, short version
 
 A bash wrapper around git that replaces the most frequent commands with readable, interactive interfaces.
