@@ -1,4 +1,4 @@
-![screenshot](https://raw.githubusercontent.com/Yusufibin/gv/refs/heads/main/screen.png)
+![screenshot](https://raw.githubusercontent.com/Yusufibin/gv/refs/heads/main/s.png)
 
 # gv — git, short version
 
